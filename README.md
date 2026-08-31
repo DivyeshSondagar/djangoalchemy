@@ -26,8 +26,7 @@ Employee.objects.filter(city__icontains="lon", salary__gte=70_000).order_by("-sa
 ## Installation
 
 ```bash
-pip install djangoalchemy        # from PyPI (once published)
-pip install -e /path/to/djangoalchemy   # development
+pip install djangoalchemy
 ```
 
 Requires Python ≥ 3.10 and SQLAlchemy ≥ 2.0.
@@ -180,64 +179,6 @@ Your model (still a SQLAlchemy model)
 - `model.py` — `configure()` walks `Base.registry` and attaches a `Manager` to each mapped model.
 
 You can mix Django-style calls and raw SQLAlchemy freely in the same codebase.
-
-## Development
-
-```bash
-pip install -e ".[dev]"
-python -m pytest
-```
-
-## Publishing to PyPI
-
-The package uses the standard PyPA workflow: a `src/` layout with a single
-`pyproject.toml` as the build config, and no `setup.py` needed.
-
-1. **Build the distributions** into `dist/`:
-
-   ```bash
-   python -m build
-   ```
-
-   This produces `dist/djangoalchemy-<version>.tar.gz` (sdist) and
-   `dist/djangoalchemy-<version>-py3-none-any.whl` (wheel).
-
-2. **Verify the artifacts**:
-
-   ```bash
-   twine check dist/*
-   ```
-
-3. **Upload to Test PyPI first** (recommended):
-
-   ```bash
-   twine upload --repository testpypi dist/*
-   ```
-
-4. **Publish to PyPI**:
-
-   ```bash
-   twine upload dist/*
-   ```
-
-You'll need a [PyPI account](https://pypi.org/account/register/) (and a
-separate one for Test PyPI). Use an API token via `TWINE_USERNAME=__token__`
-and `TWINE_PASSWORD=pypi-...`, or configure `~/.pypirc`.
-
-Then anyone can install it:
-
-```bash
-pip install djangoalchemy
-```
-
-## Roadmap
-
-- [ ] Relations: `fk__field` filters, `select_related` / `prefetch_related`
-- [ ] Aggregates: `sum`, `avg`, `group_by` + `annotate`
-- [ ] `Q`-style boolean composition (`&`, `|`)
-- [ ] `get_or_create`, `update_or_create`, `bulk_create`
-- [ ] Async engine / async session support
-- [ ] Custom manager methods per model
 
 ## License
 
