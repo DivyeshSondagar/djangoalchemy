@@ -18,6 +18,9 @@ Employee.objects.filter(city__icontains="lon", salary__gte=70_000).order_by("-sa
 - **Django lookups** — `field__icontains`, `salary__gte`, `name__in`, `city__isnull`, and 15 more
 - **Chainable, lazy, immutable querysets** — SQL is emitted only on evaluation
 - **Slicing** — `qs[10:20]` becomes `OFFSET 10 LIMIT 10`
+- **Projection** — `values` (dicts), `values_list` (tuples, scalars, namedtuples)
+- **Eager loading** — `select_related` (JOIN) and `prefetch_related` (separate query) for `relationship()`s
+- **Aggregation** — `annotate` with `Sum`, `Count`, `Avg`, `Min`, `Max`, grouped via `values()`
 - **Write shortcuts** — `.create()`, `.update()`, `.delete()` with auto-commit
 - **Session-agnostic** — works with any session provider (FastAPI dependency, request context, manual)
 - **Drop-in** — attach `.objects` to models on *any* existing declarative base
@@ -89,7 +92,13 @@ Employee.objects.filter(city="London").count()
 Employee.objects.filter(name="Zoey").exists()
 
 # Projection
-Employee.objects.values("id", "name")           # -> [{"id": 1, "name": "Zoey"}, ...]
+Employee.objects.values("id", "name")                    # -> [{"id": 1, "name": "Zoey"}, ...]
+Employee.objects.values_list("name", flat=True)          # -> ["Zoey", "Zoe", ...]
+Employee.objects.values_list("id", "name", named=True)   # -> [EmployeeRow(id=1, name="Zoey"), ...]
+
+# Eager loading (see "Relations & aggregation")
+Employee.objects.select_related("company")               # JOIN (many-to-one)
+Company.objects.prefetch_related("employees")            # separate query (one-to-many)
 
 # Writes (commit automatically)
 emp = Employee.objects.create(name="Zoey", salary=90_000, city="London")
@@ -113,6 +122,61 @@ Employee.objects.filter(city="Paris").delete()
 | `field__isnull` | `True`/`False` for NULL | `is_(None)` / `is_not(None)` |
 
 Unknown fields or lookups raise a clear `ValueError` immediately.
+
+## Relations & aggregation
+
+### Eager loading
+
+Models use plain SQLAlchemy `relationship()`s:
+
+```python
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import relationship
+
+class Company(DjangoModel):
+    __tablename__ = "companies"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+    employees = relationship("Employee", back_populates="company")
+
+class Employee(DjangoModel):
+    __tablename__ = "employees"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+    company_id = Column(Integer, ForeignKey("companies.id"))
+    company = relationship("Company", back_populates="employees")
+```
+
+```python
+# one SQL query with a LEFT JOIN — use for many-to-one (FK) relations
+Employee.objects.select_related("company").all()
+
+# separate SELECT ... WHERE fk IN (...) — use for one-to-many / reverse relations
+Company.objects.prefetch_related("employees").all()
+
+# nested paths work on both
+Employee.objects.select_related("company__ceo")
+```
+
+A path segment that isn't a relationship raises a clear `ValueError` immediately.
+
+### Aggregation
+
+```python
+from djangoalchemy import Sum, Count, Avg, Min, Max
+
+# On instances — the value is attached to each row (grouped by primary key)
+Employee.objects.annotate(total=Sum("salary")).all()      # e.total is set
+
+# Grouped report — values(...) fields become the GROUP BY columns
+Employee.objects.values("city").annotate(avg_salary=Avg("salary")).order_by("city")
+# -> [{"city": "London", "avg_salary": 105000.0}, {"city": "Paris", "avg_salary": 60000.0}]
+
+# Count supports distinct
+Company.objects.annotate(employee_count=Count("employees", distinct=True))
+```
+
+Passing anything that isn't an aggregate to `annotate()` raises `TypeError`.
 
 ## FastAPI integration
 
@@ -168,13 +232,17 @@ Your model (still a SQLAlchemy model)
     QuerySet ── builds a SQLAlchemy query lazily
         │         filter/exclude → lookups.py → sqlalchemy expressions
         │         order_by      → asc()/desc() on model columns
+        │         select_related / prefetch_related → relations.py → joinedload / selectinload
+        │         annotate      → aggregates.py → func.sum / func.count / ...
         │         slicing       → offset()/limit()
         ▼
-      result: list of model instances (or dicts with .values())
+      result: model instances, dicts (.values), tuples (.values_list), or annotated instances
 ```
 
 - `lookups.py` — maps Django lookup names to SQLAlchemy column operators.
 - `queryset.py` — the lazy, immutable, chainable query builder.
+- `relations.py` — resolves `fk__fk` paths into `joinedload` / `selectinload` options.
+- `aggregates.py` — Django-style `Sum` / `Count` / `Avg` / `Min` / `Max` mapped to SQL functions.
 - `manager.py` — the `.objects` entry point; delegates unknown methods to the queryset (Django-style).
 - `model.py` — `configure()` walks `Base.registry` and attaches a `Manager` to each mapped model.
 

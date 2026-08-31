@@ -2,13 +2,21 @@ import pytest
 
 import djangoalchemy as orm
 
-from .models import Employee
+from .models import Company, Employee
 
 
 def seed(session):
     Employee.objects.create(name="Zoey", salary=90_000, city="London")
     Employee.objects.create(name="Zoe", salary=60_000, city="Paris")
     Employee.objects.create(name="Ivy", salary=120_000, city="London")
+
+
+def seed_companies(session):
+    acme = Company.objects.create(name="Acme")
+    globex = Company.objects.create(name="Globex")
+    Employee.objects.create(name="Zoey", salary=90_000, city="London", company=acme)
+    Employee.objects.create(name="Zoe", salary=60_000, city="Paris", company=acme)
+    Employee.objects.create(name="Ivy", salary=120_000, city="London", company=globex)
 
 
 class TestCreateAndGet:
@@ -113,6 +121,73 @@ class TestProjection:
             {"name": "Zoe", "city": "Paris"},
             {"name": "Zoey", "city": "London"},
         ]
+
+
+class TestValuesList:
+    def test_tuples(self, session):
+        seed(session)
+        rows = Employee.objects.values_list("name", "city").order_by("name").all()
+        assert rows == [("Ivy", "London"), ("Zoe", "Paris"), ("Zoey", "London")]
+
+    def test_flat(self, session):
+        seed(session)
+        names = Employee.objects.values_list("name", flat=True).order_by("name").all()
+        assert names == ["Ivy", "Zoe", "Zoey"]
+
+    def test_named(self, session):
+        seed(session)
+        rows = Employee.objects.values_list("name", "city", named=True).order_by("name").all()
+        assert rows[0].name == "Ivy"
+        assert rows[0].city == "London"
+
+    def test_flat_requires_single_field(self, session):
+        with pytest.raises(ValueError, match="exactly one field"):
+            Employee.objects.values_list("name", "city", flat=True)
+
+    def test_flat_and_named_conflict(self, session):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            Employee.objects.values_list("name", flat=True, named=True)
+
+
+class TestRelations:
+    def test_select_related(self, session):
+        seed_companies(session)
+        emps = Employee.objects.select_related("company").order_by("name").all()
+        assert [e.company.name for e in emps] == ["Globex", "Acme", "Acme"]
+
+    def test_prefetch_related(self, session):
+        seed_companies(session)
+        emps = Employee.objects.prefetch_related("company").order_by("name").all()
+        assert [e.company.name for e in emps] == ["Globex", "Acme", "Acme"]
+
+    def test_reverse_prefetch(self, session):
+        seed_companies(session)
+        companies = Company.objects.prefetch_related("employees").order_by("name").all()
+        assert [len(c.employees) for c in companies] == [2, 1]
+
+    def test_unknown_relationship_raises(self, session):
+        seed_companies(session)
+        with pytest.raises(ValueError, match="not a relationship"):
+            Employee.objects.select_related("city").all()
+
+
+class TestAnnotate:
+    def test_annotate_instances(self, session):
+        seed(session)
+        emps = Employee.objects.annotate(twice=orm.Sum("salary")).all()
+        assert [e.twice for e in emps] == [90_000, 60_000, 120_000]
+
+    def test_values_annotate_groups(self, session):
+        seed(session)
+        rows = Employee.objects.values("city").annotate(total=orm.Sum("salary")).order_by("city").all()
+        assert rows == [
+            {"city": "London", "total": 210_000},
+            {"city": "Paris", "total": 60_000},
+        ]
+
+    def test_annotate_requires_aggregate(self, session):
+        with pytest.raises(TypeError, match="Aggregate"):
+            Employee.objects.annotate(x=42).all()
 
 
 class TestEvaluation:

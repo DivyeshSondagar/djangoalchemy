@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 from sqlalchemy import desc, not_
 from sqlalchemy.orm import Session
 
+from .aggregates import Aggregate
 from .lookups import conditions
+from .relations import joined_option, selectin_option
 
 
 class DoesNotExist(Exception):
@@ -31,6 +35,9 @@ class QuerySet:
         self._excludes: list = []
         self._ordering: list = []
         self._columns: tuple[str, ...] | None = None
+        self._mode: str | None = None
+        self._related: list = []
+        self._annotations: list = []
         self._offset: int | None = None
         self._limit: int | None = None
 
@@ -59,6 +66,43 @@ class QuerySet:
         """Select only the given columns; evaluates to a list of dicts."""
         clone = self._clone()
         clone._columns = fields
+        clone._mode = "dict"
+        return clone
+
+    def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> "QuerySet":
+        """Select columns as tuples; ``flat=True`` returns scalars, ``named=True`` namedtuples."""
+        if flat and named:
+            raise ValueError("flat and named are mutually exclusive")
+        if flat and len(fields) != 1:
+            raise ValueError("flat=True requires exactly one field")
+        clone = self._clone()
+        clone._columns = fields
+        clone._mode = "flat" if flat else "named" if named else "tuple"
+        return clone
+
+    def select_related(self, *paths: str) -> "QuerySet":
+        """Eagerly load relationships with a JOIN (use for ``many-to-one``)."""
+        clone = self._clone()
+        for path in paths:
+            clone._related.append(joined_option(self._model, path))
+        return clone
+
+    def prefetch_related(self, *paths: str) -> "QuerySet":
+        """Eagerly load relationships with a separate query (use for ``one-to-many``)."""
+        clone = self._clone()
+        for path in paths:
+            clone._related.append(selectin_option(self._model, path))
+        return clone
+
+    def annotate(self, **annotations) -> "QuerySet":
+        """Add aggregate expressions; combine with ``values()`` to group by those columns."""
+        clone = self._clone()
+        for alias, aggregate in annotations.items():
+            if not isinstance(aggregate, Aggregate):
+                raise TypeError(
+                    f"annotate({alias}=...) expects an Aggregate (Sum, Count, Avg, Min, Max)"
+                )
+            clone._annotations.append((alias, aggregate))
         return clone
 
     def offset(self, count: int) -> "QuerySet":
@@ -78,6 +122,8 @@ class QuerySet:
             query = query.filter(cond)
         for cond in self._excludes:
             query = query.filter(cond)
+        for option in self._related:
+            query = query.options(option)
         if self._ordering:
             query = query.order_by(*self._ordering)
         if self._offset is not None:
@@ -87,12 +133,52 @@ class QuerySet:
         return query
 
     def _all(self) -> list:
+        if self._annotations:
+            return self._annotated()
         query = self._query()
         if self._columns:
             columns = [getattr(self._model, c) for c in self._columns]
             rows = query.with_entities(*columns).all()
-            return [dict(zip(self._columns, row)) for row in rows]
+            return self._project(rows)
         return query.all()
+
+    def _project(self, rows: list) -> list:
+        if self._mode == "flat":
+            return [row[0] for row in rows]
+        if self._mode == "named":
+            row_type = namedtuple(f"{self._model.__name__}Row", self._columns)
+            return [row_type(*row) for row in rows]
+        if self._mode == "tuple":
+            return [tuple(row) for row in rows]
+        return [dict(zip(self._columns, row)) for row in rows]
+
+    def _annotated(self) -> list:
+        query = self._query()
+        if self._columns:
+            columns = [getattr(self._model, c) for c in self._columns]
+            query = query.with_entities(*columns)
+            for alias, aggregate in self._annotations:
+                query = query.add_columns(aggregate.expression(self._model).label(alias))
+            rows = query.group_by(*columns).all()
+            keys = list(self._columns) + [alias for alias, _ in self._annotations]
+            if self._mode == "flat":
+                return [row[0] for row in rows]
+            if self._mode == "named":
+                row_type = namedtuple(f"{self._model.__name__}Row", keys)
+                return [row_type(*row) for row in rows]
+            if self._mode == "tuple":
+                return [tuple(row) for row in rows]
+            return [dict(zip(keys, row)) for row in rows]
+        for alias, aggregate in self._annotations:
+            query = query.add_columns(aggregate.expression(self._model).label(alias))
+        query = query.group_by(*self._model.__mapper__.primary_key)
+        instances = []
+        for row in query.all():
+            instance = row[0]
+            for i, (alias, _aggregate) in enumerate(self._annotations, start=1):
+                setattr(instance, alias, row[i])
+            instances.append(instance)
+        return instances
 
     def all(self) -> list:
         """Evaluate and return all matching rows."""
@@ -179,6 +265,9 @@ class QuerySet:
         clone._excludes = list(self._excludes)
         clone._ordering = list(self._ordering)
         clone._columns = self._columns
+        clone._mode = self._mode
+        clone._related = list(self._related)
+        clone._annotations = list(self._annotations)
         clone._offset = self._offset
         clone._limit = self._limit
         return clone

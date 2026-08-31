@@ -5,7 +5,7 @@ from sqlalchemy.pool import StaticPool
 
 import djangoalchemy as orm
 
-from .models import Base, Employee
+from .models import Base, Company, Employee
 
 
 @pytest.fixture()
@@ -17,6 +17,9 @@ def session():
     )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
-    orm.bind(Employee, lambda: factory())
-    yield factory()
+    db = factory()
+    orm.bind(Employee, db)
+    orm.bind(Company, db)
+    yield db
+    db.close()
     Base.metadata.drop_all(engine)
